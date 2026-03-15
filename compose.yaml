@@ -1,0 +1,74 @@
+services:
+
+  newt:
+    image: fosrl/newt
+    container_name: newt-ta
+    restart: unless-stopped
+    environment:
+      - PANGOLIN_ENDPOINT=${PANGOLIN_ENDPOINT}
+      - NEWT_ID=${NEWT_ID}
+      - NEWT_SECRET=${NEWT_SECRET}
+    networks:
+          - tarware_net
+  # ── Session manager ───────────────────────────────────────────────────────────
+  manager:
+    image: tarware-manager:latest
+    pull_policy: never
+    # build:
+    #   context: ./manager
+    #   dockerfile: Dockerfile
+    ports:
+      - "8001:8001"
+    environment:
+      DOCKER_NETWORK: "tarware_net"
+      SIM_IMAGE: "tarware-simulation:latest"
+      SIM_BUILD_CONTEXT: "/sim-src"
+      TARWARE_ENV: "tarware-tiny-3agvs-2pickers-partialobs-v1"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - /home/nas/shared/containers/tarware-docker/simulation:/sim-src:ro
+    networks:
+      - tarware_net
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8001/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── Streamlit UI ──────────────────────────────────────────────────────────────
+  streamlit:
+    image: tarware-streamlit:latest
+    pull_policy: never
+    # build:
+    #   context: ./streamlit
+    #   dockerfile: Dockerfile
+    environment:
+      MANAGER_URL: "http://manager:8001"
+      MANAGER_PUBLIC_URL: "https://tarware.nasrudeen.com/manager"
+    ports:
+      - "8501:8501"
+    networks:
+      - tarware_net
+    depends_on:
+      manager:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # ── Simulation image ──────────────────────────────────────────────────────────
+  simulation:
+    # build:
+    #   context: ./simulation
+    #   dockerfile: Dockerfile
+    image: tarware-simulation:latest
+    pull_policy: never
+    profiles:
+      - build-only
+    networks:
+      - tarware_net
+
+
+networks:
+  tarware_net:
+    name: tarware_net
+    driver: bridge

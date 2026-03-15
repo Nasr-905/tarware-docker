@@ -1,0 +1,23 @@
+[project]
+name = "tarware-manager"
+version = "0.1.0"
+description = "Session lifecycle manager for TA-RWARE multi-user simulation"
+requires-python = ">=3.10"
+dependencies = [
+    "fastapi==0.111.0",
+    "uvicorn[standard]==0.30.1",
+    "docker==7.1.0",
+    "pydantic==2.7.1",
+    "requests==2.32.3",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "httpx",   # for testing FastAPI endpoints
+    "ruff",
+]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"

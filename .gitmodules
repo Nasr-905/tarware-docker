@@ -1,0 +1,3 @@
+[submodule "simulation/tarware"]
+	path = simulation/tarware
+	url = git@github.com:Nasr-905/task-assignment-robotic-warehouse.git
