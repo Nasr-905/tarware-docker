@@ -6,6 +6,8 @@ COPY pyproject.toml .
 RUN pip install --no-cache-dir .
 
 COPY app.py .
+COPY access.py .
+COPY pages/ pages/
 COPY .streamlit/ .streamlit/
 
 EXPOSE 8501
