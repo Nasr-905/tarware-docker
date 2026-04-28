@@ -1,0 +1,789 @@
+% DHL Capstone Presentation - Robotic Warehouse Optimisation
+% Compile with: pdflatex dhl_capstone.tex  (run twice for ToC/refs)
+% Requires: metropolis theme, pgfplots, tikz, booktabs
+% If metropolis is unavailable, change \usetheme{metropolis} to \usetheme{Berlin}
+% and remove the \metroset line.
+
+\documentclass[aspectratio=169, 12pt]{beamer}
+
+% ── Theme ─────────────────────────────────────────────────────────────────────
+\usetheme{metropolis}
+\metroset{progressbar=frametitle, sectionpage=progressbar, numbering=fraction}
+
+% ── DHL Brand Colours ─────────────────────────────────────────────────────────
+\definecolor{dhlRed}{HTML}{D40511}
+\definecolor{dhlYellow}{HTML}{FFCC00}
+\definecolor{dhlGrey}{HTML}{444444}
+
+\setbeamercolor{frametitle}{bg=dhlRed, fg=white}
+\setbeamercolor{title separator}{fg=dhlYellow}
+\setbeamercolor{progress bar}{fg=dhlYellow, bg=dhlGrey!30}
+\setbeamercolor{alerted text}{fg=dhlRed}
+\setbeamercolor{normal text}{fg=dhlGrey}
+\setbeamercolor{example text}{fg=dhlRed!80!black}
+
+% ── Packages ──────────────────────────────────────────────────────────────────
+\usepackage{pgfplots}
+\pgfplotsset{compat=1.18}
+\usepackage{tikz}
+\usetikzlibrary{arrows.meta, shapes.rounded, positioning, fit, backgrounds}
+\usepackage{booktabs}
+\usepackage{colortbl}
+\usepackage{xcolor}
+\usepackage{graphicx}
+\usepackage{array}
+\usepackage{microtype}
+
+% ── Helpers ───────────────────────────────────────────────────────────────────
+\newcommand{\kpi}[1]{\textbf{\color{dhlRed}#1}}
+\newcommand{\todo}[1]{\textbf{\color{dhlYellow!70!black}[#1]}}
+
+% ── Metadata ──────────────────────────────────────────────────────────────────
+\title{Supplementing Order Fulfillment With inVia Robots}
+\subtitle{DHL Capstone Simulation - Baseline Demo}
+\author{Capstone Team}  % TODO: replace with actual names
+\institute{University Capstone Project \\ in partnership with DHL}
+\date{\today}
+
+% ══════════════════════════════════════════════════════════════════════════════
+\begin{document}
+% ══════════════════════════════════════════════════════════════════════════════
+
+% ── Slide 1: Title ────────────────────────────────────────────────────────────
+{
+\setbeamercolor{background canvas}{bg=dhlRed}
+\setbeamercolor{normal text}{fg=white}
+\setbeamercolor{title}{fg=dhlYellow}
+\setbeamercolor{subtitle}{fg=white}
+\setbeamercolor{author}{fg=white!90}
+\setbeamercolor{date}{fg=white!80}
+\setbeamercolor{institute}{fg=white!80}
+\begin{frame}[plain]
+  \vspace{1em}
+  % Logo placeholder - drop dhl_logo.png next to this .tex file to enable
+  % \includegraphics[width=2.5cm]{dhl_logo}\hfill
+  \titlepage
+\end{frame}
+}
+
+% ── Slide 2: Agenda ───────────────────────────────────────────────────────────
+\begin{frame}{Today's Agenda}
+  \setlength{\leftmargini}{1.5em}
+  \begin{enumerate}
+    \item \textbf{The Challenge} \hfill \small\color{dhlGrey} why we're here
+    \item \textbf{Data \& Scale} \hfill \small\color{dhlGrey} what DHL's operation looks like
+    \item \textbf{Robotic Solution} \hfill \small\color{dhlGrey} bots, shelves, pickerwall
+    \item \textbf{Simulation \& Results} \hfill \small\color{dhlGrey} baseline metrics
+    \item \textbf{Roadmap} \hfill \small\color{dhlGrey} what's next
+  \end{enumerate}
+\end{frame}
+
+% ══════════════════════════════════════════════════════════════════════════════
+\section{Design Challenge}
+% ══════════════════════════════════════════════════════════════════════════════
+
+
+\begin{frame}[shrink]{Design Challenge}
+  % Changed [T] to [c] for vertical alignment
+    \vspace{0.5cm}
+  \begin{columns}[c]
+    \begin{column}{0.55\textwidth}
+      \small
+      \textbf{Conventional Human-Only Operation}
+      \vspace{0.3em}
+      \begin{itemize}\setlength{\itemsep}{0.3em}
+        \item Human pickers walk to storage shelves, retrieve items, return to pack station
+        \item \alert{Walking time} dominates over actual picking time (see Figure)
+        \item Order waves create \alert{peak load surges}, which is hard to scale dynamically with headcount alone
+        \item In this system, pickers pick at \textbf{$\sim$60 units per hour (UPH)}
+      \end{itemize}
+    \end{column}
+
+    \hfill
+    
+    \begin{column}{0.2\textwidth}
+      % Added hfill and specific xshift to force right-alignment
+      \hfill
+      \begin{tikzpicture}[xshift=5cm]
+        \begin{scope}
+          \fill[dhlRed!60] (0,0) -- (90:1.8cm) arc (90:306:1.8cm) -- cycle;
+          \fill[dhlYellow!80!black] (0,0) -- (306:1.8cm) arc (306:450:1.8cm) -- cycle;
+          
+          \node[font=\small, align=center] at (200:1.0cm) {\textbf{60\%}\\walking};
+          \node[font=\small, align=center] at (340:1.0cm) {\textbf{40\%}\\picking};
+        \end{scope}
+        
+        \node[yshift=-2.2cm, font=\tiny\itshape, text=dhlGrey, align=center] at (0,0)
+          {Picker time breakdown in a\\conventional warehouse};
+      \end{tikzpicture}
+    \end{column}
+  \end{columns}
+  
+  \vspace{1em}
+  \begin{alertblock}{Key question}
+  \vspace{0.5em}
+    How much can mobile robots reduce walking time, and what throughput gain is possible?
+  \end{alertblock}
+\end{frame}
+
+% MOHIT FEEDBACK:
+% Clarify that we are referring to a typical manual operation
+% Clarify statistics (don't use 150 UPH, as that isn't factoring in time)
+
+% ══════════════════════════════════════════════════════════════════════════════
+\section{Warehouse Environment}
+% ══════════════════════════════════════════════════════════════════════════════
+
+% ── Slide 6: The Solution ─────────────────────────────────────────────────────
+\begin{frame}{Automated Shelf Retrieval: INVIA Bots}
+  \begin{columns}[T,onlytextwidth]
+    \begin{column}{0.50\textwidth}
+      \footnotesize
+      \setlength{\parskip}{0pt}
+
+      \textbf{How it works}
+      \vspace{0.1em}
+
+      {\setlength{\leftmargini}{1em}
+      \begin{itemize}\setlength{\itemsep}{0.15em}
+        \item \kpi{INVIA mobile robots} ($\approx$2$\times$2 ft) navigate 5 ft storage aisles
+        \item Robots \textbf{carry entire bins} to a pickerwall
+        \item Human pickers work on the \textbf{other side} of the wall
+        \item Bots return bins to storage and fetch the next request
+      \end{itemize}
+      }
+
+      \vspace{0.15em}
+      \textbf{Key benefit}\\[-0.2em]
+      Pickers stay roughly stationary; the walking bottleneck is gone.
+    \end{column}
+
+    \begin{column}{0.46\textwidth}
+      \centering
+      % Top Figure
+      \includegraphics[width=\linewidth,height=0.40\textheight,keepaspectratio]{invia-picker-robots.png}
+      
+      \vspace{1em} \\ % Vertical gap
+      
+      % Bottom Figure
+      \includegraphics[width=\linewidth,height=0.40\textheight,keepaspectratio]{layout_zoomed.png}
+    \end{column}
+  \end{columns}
+\end{frame}
+
+
+% ── Slide 7: Warehouse Layout ─────────────────────────────────────────────────
+\begin{frame}{Warehouse Layout}
+  % Changed [T] to [c] for vertical centering
+  \begin{columns}[c,onlytextwidth]
+    \begin{column}{0.50\textwidth}
+      \footnotesize
+      \setlength{\parskip}{0pt}
+
+      \textbf{Grid mapped from DHL facility}
+      \vspace{0.1em}
+
+      {\setlength{\leftmargini}{1em}
+      \begin{itemize}\setlength{\itemsep}{0.12em}
+        \item Shelf rows and columns scaled to match the real floor plan
+        \item Aisle widths match the INVIA 5 ft navigation constraint
+        \item Pickerwall slots correspond to physical delivery positions
+        \item Highway lanes separate storage blocks for bot routing
+        \item The replenishment location is how new items enter the system
+      \end{itemize}
+      }
+
+      \vspace{0.1em}
+      \scriptsize\textit{Facility dimensions and layout derived from DHL CAD drawings.}
+    \end{column}
+
+    \begin{column}{0.46\textwidth}
+      \centering
+      \includegraphics[width=\linewidth,height=0.60\textheight,keepaspectratio]{layout.png}
+    \end{column}
+  \end{columns}
+\end{frame}
+
+% ══════════════════════════════════════════════════════════════════════════════
+\section{Data \& Scale}
+% ══════════════════════════════════════════════════════════════════════════════
+
+% ── Slide 4: Operations at Scale ──────────────────────────────────────────────
+% \begin{frame}{DHL Operations at Scale}
+%   \begin{columns}[T]
+%     \begin{column}{0.48\textwidth}
+%       \textbf{Order wave structure}
+%       \vspace{0.3em}
+%       \begin{itemize}
+%         \item Orders arrive in \textbf{2-hour time buckets}
+%         \item All orders in a bucket released together at wave start
+%         \item \textbf{$\sim$4{,}035 active SKUs} per 2-hour window
+%         \item \textbf{6–7 operational days} of real data provided by DHL
+%       \end{itemize}
+%       \vspace{0.6em}
+%       \textbf{Picker baseline}
+%       \vspace{0.3em}
+%       \begin{itemize}
+%         \item \kpi{150 UPH} per human picker
+%         \item This is the target our simulation competes against
+%       \end{itemize}
+%     \end{column}
+%     \begin{column}{0.48\textwidth}
+%       \begin{tikzpicture}[scale=0.9]
+%         \begin{axis}[
+%           ybar, bar width=9pt,
+%           xlabel={Hour of day},
+%           ylabel={Order volume},
+%           xtick={1,3,5,7,9,11},
+%           xticklabels={6am,8am,10am,12pm,2pm,4pm},
+%           xlabel style={font=\small},
+%           ylabel style={font=\small},
+%           tick label style={font=\small},
+%           ymin=0, ymax=550,
+%           width=6cm, height=4.5cm,
+%           bar shift=0pt,
+%           title style={font=\small},
+%           title={Illustrative wave volume},
+%           grid=major, grid style={dashed, gray!30},
+%           area style,
+%         ]
+%           % TODO: replace with real DHL order volumes per 2-hr bucket
+%           \addplot[fill=dhlRed!70, draw=dhlRed]
+%             coordinates {(1,180)(2,310)(3,480)(4,420)(5,350)(6,260)
+%                          (7,200)(8,150)(9,130)(10,110)(11,90)};
+%         \end{axis}
+%       \end{tikzpicture}
+%     \end{column}
+%   \end{columns}
+% \end{frame}
+\begin{frame}{DHL Operations at Scale}
+
+\textbf{Order wave structure}
+\vspace{0.2em}
+
+\begin{columns}[T,onlytextwidth]
+  \begin{column}{0.48\textwidth}
+    \begin{itemize}\setlength{\itemsep}{0.6em}
+      \item \small Orders arrive in \textbf{2-hour time buckets}
+      \item \small \textbf{$\sim$4{,}035 active SKUs} per 2-hour window
+    \end{itemize}
+  \end{column}
+  \begin{column}{0.48\textwidth}
+    \begin{itemize}\setlength{\itemsep}{0.6em}
+      \item \small All orders in a bucket released together at wave start
+      \item \small \textbf{6 - 7 days} of high interest operational data selected out of \sio30 days of real data provided by DHL
+    \end{itemize}
+  \end{column}
+\end{columns}
+
+\vspace{0.4em}
+
+\textbf{Total Orders (over \simn 30 days)}
+\vspace{0.1em}
+
+\begin{itemize}\setlength{\itemsep}{0.3em}
+  \item 875,681 units
+  \item 522,423 orders
+  \item 75,588 unique SKUs
+\end{itemize}
+
+\end{frame}
+
+\begin{frame}{Storage Model \& Physical Constraints}
+
+\footnotesize
+
+\textbf{Bin capacity}
+\vspace{0.1em}
+\begin{itemize}\setlength{\itemsep}{0.1em}
+  \item $15.87 \times 23.74 \times 12.28$ in
+  \item \textbf{2.68 ft$^3$} total, \textbf{2.28 ft$^3$ usable (85\%)}
+  \item \kpi{3-40 units per bin/tote}
+\end{itemize}
+
+\vspace{0.2em}
+
+\textbf{Storage geometry}
+\vspace{0.1em}
+\begin{itemize}\setlength{\itemsep}{0.1em}
+  \item $5 \times 5 \times 2$ $\Rightarrow $ \kpi{50 bins per bay}
+  \item \kpi{57.75 ft$^2$ per bay}
+  \item \kpi{75,880 bins} $\Rightarrow$ $\sim$758k units capacity
+\end{itemize}
+
+\vspace{0.2em}
+
+\textbf{Constraints}
+\vspace{0.1em}
+\begin{itemize}\setlength{\itemsep}{0.1em}
+  \item 5 ft bot aisles, 8 ft picker aisles
+\end{itemize}
+
+\end{frame}
+
+\begin{frame}{Demand Distribution \& System Implications}
+
+\footnotesize
+
+\begin{columns}[T,onlytextwidth]
+
+% LEFT COLUMN
+\begin{column}{0.48\textwidth}
+
+\textbf{Observed demand}
+\vspace{0.1em}
+\begin{itemize}\setlength{\itemsep}{0.1em}
+  \item Up to \kpi{177 units/day per SKU}
+  \item Broad, long-tailed distribution
+\end{itemize}
+
+\vspace{0.2em}
+
+\textbf{Bin implications}
+\vspace{0.1em}
+\begin{itemize}\setlength{\itemsep}{0.1em}
+  \item $\sim$10 units/bin (average)
+  \item \kpi{Significant replenishment requirement}
+\end{itemize}
+
+\end{column}
+
+% RIGHT COLUMN
+\begin{column}{0.48\textwidth}
+
+\textbf{Scale effect}
+\vspace{0.1em}
+\begin{itemize}\setlength{\itemsep}{0.1em}
+  \item Thousands of SKUs drive volume
+  \item Not strongly Pareto
+\end{itemize}
+
+\vspace{0.2em}
+
+\textbf{Example}
+\vspace{0.1em}
+\begin{itemize}\setlength{\itemsep}{0.1em}
+  \item 177 units/day for a SKU with capacity 20 units
+  \item $\Rightarrow$ \kpi{9 replenishments per day}
+\end{itemize}
+
+\end{column}
+
+\end{columns}
+
+\vspace{0.3em}
+
+\begin{alertblock}{System insight}
+\footnotesize
+\vspace{0.1cm}
+Bots must prioritize certain SKUs to remain on the pickerwall due to continual demand, and quickly replace those SKU bins as their quantity runs out.
+\end{alertblock}
+
+\end{frame}
+
+\begin{frame}{Key Takeaway}
+
+\begin{alertblock}{Core constraint}
+The warehouse is simultaneously:
+\begin{itemize}
+  \item \textbf{physically constrained} (finite bin capacity)
+  \item \textbf{demand-diverse} (broad SKU distribution)
+\end{itemize}
+\end{alertblock}
+
+\vspace{0.5em}
+
+\begin{itemize}
+  \item Total storage spans \kpi{75,880 bins}, but demand is distributed across thousands of SKUs
+  \item High-demand SKUs drive disproportionate traffic
+  \item System performance depends on \textbf{mapping demand to physical layout}
+\end{itemize}
+
+\end{frame}
+
+% % ── Slide 5: SKU Velocity ─────────────────────────────────────────────────────
+% \begin{frame}{SKU Velocity - ABC Analysis}
+%   \begin{columns}[T]
+%     \begin{column}{0.48\textwidth}
+%       \textbf{Pareto principle holds}
+%       \vspace{0.4em}
+%       \begin{itemize}
+%         \item \alert{A-class} ($\sim$20\% of SKUs) $\rightarrow$ $\sim$80\% of picks
+%         \item \alert{B-class} ($\sim$30\% of SKUs) $\rightarrow$ $\sim$15\% of picks
+%         \item \alert{C-class} ($\sim$50\% of SKUs) $\rightarrow$ $\sim$5\% of picks
+%       \end{itemize}
+%       \vspace{0.6em}
+%       \textbf{Storage implication}\\
+%       Fast-moving SKUs (A-class) stored \textbf{closest to the pickerwall} - shortest bot travel distance, highest throughput.
+%     \end{column}
+%     \begin{column}{0.48\textwidth}
+%       \begin{tikzpicture}[scale=0.9]
+%         \begin{axis}[
+%           xlabel={Cumulative \% of SKUs},
+%           ylabel={Cumulative \% of picks},
+%           xmin=0, xmax=100, ymin=0, ymax=100,
+%           width=6cm, height=4.8cm,
+%           xlabel style={font=\small},
+%           ylabel style={font=\small},
+%           tick label style={font=\small},
+%           grid=major, grid style={dashed, gray!30},
+%           title={Lorenz Curve - SKU Velocity},
+%           title style={font=\small},
+%         ]
+%           % TODO: replace with real DHL ABC data
+%           \addplot[thick, color=dhlRed, smooth]
+%             coordinates {(0,0)(5,25)(10,42)(15,55)(20,67)
+%                          (30,80)(40,88)(50,93)(65,97)(80,99)(100,100)};
+%           \addplot[dashed, gray, thin]
+%             coordinates {(0,0)(100,100)};
+%           % ABC zone fills
+%           \fill[dhlRed!15] (axis cs:0,0) rectangle (axis cs:20,67);
+%           \fill[dhlYellow!30] (axis cs:20,0) rectangle (axis cs:50,93);
+%           \node[font=\tiny\bfseries, color=dhlRed] at (axis cs:10,20) {A};
+%           \node[font=\tiny\bfseries, color=dhlYellow!70!black] at (axis cs:35,40) {B};
+%           \node[font=\tiny\bfseries, color=dhlGrey] at (axis cs:72,60) {C};
+%         \end{axis}
+%       \end{tikzpicture}
+%     \end{column}
+%   \end{columns}
+% \end{frame}
+
+% ══════════════════════════════════════════════════════════════════════════════
+\section{Software Solution}
+% ══════════════════════════════════════════════════════════════════════════════
+
+% ── Slide 7: Warehouse Layout ─────────────────────────────────────────────────
+\begin{frame}{Software Pieces}
+  \begin{columns}[c,onlytextwidth]
+    \begin{column}{0.50\textwidth}
+      \footnotesize
+      \setlength{\parskip}{0pt}
+
+      \textbf{Agent Dynamics and Constraints}
+      \vspace{0.1em}
+
+      {\setlength{\leftmargini}{1em}
+      \begin{itemize}\setlength{\itemsep}{0.12em}
+        \item \textbf{Hybrid Workforce}: System utilizes both human pickers and \kpi{AGVs} (Invia bots)
+        \item \textbf{AGV Logic}: Bot task assignment is trainable, and algorithm-dependent
+        \item \textbf{Picker Logic}: Human agents operate under a fixed algorithm; they are not susceptible to learning algorithms
+        \item \textbf{Human Factors}: We've incorporated human factors to limit how fast humans move and pick items to match realistic conditions
+        \item \textbf{Spatial Segregation}: Pickers are restricted to the central warehouse region, AGVs are prohitibed from entering this area.
+      \end{itemize}
+      }
+
+      \vspace{0.1em}
+      \scriptsize\textit{Operational zones defined to optimize safety and throughput.}
+    \end{column}
+
+    \begin{column}{0.46\textwidth}
+      \centering
+      % Updated figure path to warehouse_zones.png
+      \includegraphics[width=\linewidth,height=0.60\textheight,keepaspectratio]{tarware.png}
+    \end{column}
+  \end{columns}
+\end{frame}
+
+% ── Slide 8: Retrieval Cycle ──────────────────────────────────────────────────
+\begin{frame}{The Retrieval Cycle}
+  \vspace{0.3em}
+  \begin{center}
+    \resizebox{0.8\columnwidth}{!}{
+    \begin{tikzpicture}[
+      x=4cm, 
+      y=1.8cm, % Scaled y to fit more flows
+      state/.style={draw=dhlRed, fill=dhlRed!10, rounded corners=5pt,
+                    minimum width=2.1cm, minimum height=0.75cm,
+                    font=\small\bfseries, align=center},
+      arr/.style={-{Stealth[length=5pt]}, thick, color=dhlGrey},
+      label/.style={font=\scriptsize, color=dhlGrey, align=center}
+    ]
+    
+      % --- Flow 1: Order Picking ---
+      \node[font=\normalsize\bfseries, color=dhlGrey] at (1.5, 0.7) {FLOW 1: ORDER PICKING};
+      
+      \node[state] (idle1) at (0,0) {Idle};
+      \node[state] (nav1)  at (1.1,0) {Navigate to Shelf\\@ Storage};
+      \node[state] (pick1) at (2.2,0) {Pick Up\\Shelf};
+      \node[state] (del1)  at (3.3,0) {Deliver to\\Pickerwall};
+      
+      \draw[arr] (idle1) -- node[above, label] {order\\queued} (nav1);
+      \draw[arr] (nav1)  -- node[above, label] {arrived} (pick1);
+      \draw[arr] (pick1) -- node[above, label] {shelf\\loaded} (del1);
+      \draw[arr] (del1.south) -- ++(0,-0.3) coordinate (bot1) -- (idle1.south |- bot1) -- (idle1.south);
+
+      % --- Flow 2: Back to Storage ---
+      \node[font=\normalsize\bfseries, color=dhlGrey] at (1.5, -1.1) {FLOW 2: BACK TO STORAGE};
+      
+      \node[state] (idle2) at (0,-1.8) {Idle};
+      \node[state] (nav2)  at (1.1,-1.8) {Navigate to Shelf\\@ Pickerwall};
+      \node[state] (pick2) at (2.2,-1.8) {Pick Up\\Shelf};
+      \node[state] (del2)  at (3.3,-1.8) {Deliver to\\Storage};
+      
+      \draw[arr] (idle2) -- node[above, label] {fulfilled} (nav2);
+      \draw[arr] (nav2)  -- node[above, label] {arrived} (pick2);
+      \draw[arr] (pick2) -- node[above, label] {shelf\\loaded} (del2);
+      \draw[arr] (del2.south) -- ++(0,-0.3) coordinate (bot2) -- (idle2.south |- bot2) -- (idle2.south);
+
+      % --- Flow 3: SKU Replenishment ---
+      \node[font=\normalsize\bfseries, color=dhlGrey] at (1.5, -2.9) {FLOW 3: SKU REPLENISHMENT};
+      
+      \node[state] (idle3) at (0,-3.6) {Idle};
+      \node[state] (req3)  at (1,-3.6) {Request\\New Bin};
+      \node[state] (delE3) at (2,-3.6) {Deliver Empty\\to Replen.};
+      \node[state] (getF3) at (3,-3.6) {Fetch New\\Bin};
+      \node[state] (delS3) at (4,-3.6) {Deliver to\\Storage};
+      
+      \draw[arr] (idle3) -- node[above, label] {bin empty} (req3);
+      \draw[arr] (req3)  -- node[above, label] {queued} (delE3);
+      \draw[arr] (delE3) -- node[above, label] {exchanged} (getF3);
+      \draw[arr] (getF3) -- node[above, label] {loaded} (delS3);
+      \draw[arr] (delS3.south) -- ++(0,-0.3) coordinate (bot3) -- (idle3.south |- bot3) -- (idle3.south);
+    
+    \end{tikzpicture}
+    }
+  \end{center}
+\end{frame}
+
+% ══════════════════════════════════════════════════════════════════════════════
+\section{Demo}
+% ══════════════════════════════════════════════════════════════════════════════
+
+% ══════════════════════════════════════════════════════════════════════════════
+\section{Simulation \& Results}
+% ══════════════════════════════════════════════════════════════════════════════
+
+% ── Slide 9: KPIs ─────────────────────────────────────────────────────────────
+\begin{frame}{Key Performance Indicators}
+  \begin{center}
+  \renewcommand{\arraystretch}{0.6}
+  \begin{tabular}{>{\bfseries}p{4.5cm} p{4.5cm} p{4.5cm}}
+    \toprule
+    KPI & Definition & Why it matters \\
+    \midrule
+    \rowcolor{dhlRed!8}
+    UPH (Units/Hour)    & Total deliveries $\times$ scale factor & Primary throughput metric \\
+    Bot Utilisation     & \% of time bots are active             & Fleet efficiency \\
+    \rowcolor{dhlRed!8}
+    Distance / Bot      & Avg path length per bot per episode    & Travel overhead \\
+    Clash Rate          & \% of steps with movement conflicts    & Traffic density \\
+    \rowcolor{dhlRed!8}
+    Deliveries          & Shelf deliveries per episode           & Raw productivity \\
+    \bottomrule
+  \end{tabular}
+  \end{center}
+  \vspace{0.5em}
+  \begin{block}{Simulation episodes}
+    Each episode = 500 time steps at a 5-second real-time equivalent per step
+    $\Rightarrow$ $\sim$\textbf{42 minutes} of operational time per episode.
+  \end{block}
+\end{frame}
+% ── Slide 10: Throughput ──────────────────────────────────────────────────────
+% \begin{frame}{Throughput Results - Units Per Hour}
+%   \begin{columns}[T]
+%     \begin{column}{0.55\textwidth}
+%       \begin{tikzpicture}
+%         \begin{axis}[
+%           xlabel={Episode},
+%           ylabel={UPH},
+%           xmin=0.5, xmax=10.5,
+%           ymin=0, ymax=130,
+%           xtick={1,...,10},
+%           width=7cm, height=5cm,
+%           xlabel style={font=\small},
+%           ylabel style={font=\small},
+%           tick label style={font=\small},
+%           grid=major, grid style={dashed, gray!30},
+%           title={Simulated UPH per episode},
+%           title style={font=\small},
+%         ]
+%           % TODO: replace with real values from Streamlit /episode_stats
+%           \addplot[thick, color=dhlRed, mark=*, mark size=2pt]
+%             coordinates {(1,62)(2,71)(3,75)(4,73)(5,78)
+%                          (6,80)(7,77)(8,82)(9,84)(10,83)};
+%           % Reference line: human baseline
+%           \addplot[dashed, color=dhlGrey, thick]
+%             coordinates {(0.5,150)(10.5,150)};
+%           \node[font=\tiny, color=dhlGrey, anchor=west]
+%             at (axis cs:8.2, 152) {Human baseline};
+%         \end{axis}
+%       \end{tikzpicture}
+%     \end{column}
+%     \begin{column}{0.42\textwidth}
+%       \vspace{1em}
+%       \begin{itemize}
+%         \item Simulation reaches \kpi{$\sim$80 UPH} per bot in steady state
+%         \item Warm-up effect visible in early episodes as bots learn the pattern
+%         \item \textbf{Multiple bots multiply throughput} - 3 bots $\approx$ 240 UPH total
+%         \item Human baseline (150 UPH single picker) is \textbf{exceeded at 2+ bots}
+%       \end{itemize}
+%       \vspace{0.4em}
+%       \small\textit{% TODO: confirm UPH formula with team\\
+%       \texttt{pick\_rate = deliveries $\times$ 3600 / (5 $\times$ timesteps)}}
+%     \end{column}
+%   \end{columns}
+% \end{frame}
+
+% % ── Slide 11: Bot Efficiency ──────────────────────────────────────────────────
+% \begin{frame}{Bot Efficiency}
+%   \begin{columns}[T]
+%     \begin{column}{0.48\textwidth}
+%       \textbf{Bot Utilisation}
+%       \begin{tikzpicture}
+%         \begin{axis}[
+%           xlabel={Episode},
+%           ylabel={Utilisation (\%)},
+%           xmin=0.5, xmax=10.5,
+%           ymin=0, ymax=100,
+%           xtick={1,3,5,7,9},
+%           width=5.5cm, height=3.8cm,
+%           xlabel style={font=\scriptsize},
+%           ylabel style={font=\scriptsize},
+%           tick label style={font=\scriptsize},
+%           grid=major, grid style={dashed,gray!30},
+%         ]
+%           % TODO: replace with real agv_utilization from /episode_stats
+%           \addplot[thick, color=dhlRed, mark=square*, mark size=1.5pt]
+%             coordinates {(1,58)(2,65)(3,70)(4,68)(5,73)
+%                          (6,74)(7,72)(8,76)(9,75)(10,77)};
+%         \end{axis}
+%       \end{tikzpicture}
+%     \end{column}
+%     \begin{column}{0.48\textwidth}
+%       \textbf{Average Distance per Bot}
+%       \begin{tikzpicture}
+%         \begin{axis}[
+%           xlabel={Episode},
+%           ylabel={Steps travelled},
+%           xmin=0.5, xmax=10.5,
+%           ymin=0, ymax=500,
+%           xtick={1,3,5,7,9},
+%           width=5.5cm, height=3.8cm,
+%           xlabel style={font=\scriptsize},
+%           ylabel style={font=\scriptsize},
+%           tick label style={font=\scriptsize},
+%           grid=major, grid style={dashed,gray!30},
+%         ]
+%           % TODO: replace with real distance_per_bot from /episode_stats
+%           \addplot[thick, color=dhlYellow!70!black, mark=triangle*, mark size=1.5pt]
+%             coordinates {(1,310)(2,325)(3,340)(4,335)(5,342)
+%                          (6,348)(7,345)(8,350)(9,352)(10,351)};
+%         \end{axis}
+%       \end{tikzpicture}
+%     \end{column}
+%   \end{columns}
+%   \vspace{0.4em}
+%   \small Bots are active \textbf{$\sim$75\% of the time} in steady state.
+%   Remaining 25\% is idle time between order waves - reduces as order density increases.
+% \end{frame}
+
+% % ── Slide 12: Reliability ─────────────────────────────────────────────────────
+% \begin{frame}{System Reliability}
+%   \begin{columns}[T]
+%     \begin{column}{0.55\textwidth}
+%       \begin{tikzpicture}
+%         \begin{axis}[
+%           xlabel={Episode},
+%           ylabel={Clash Rate (\%)},
+%           xmin=0.5, xmax=10.5,
+%           ymin=0, ymax=10,
+%           xtick={1,...,10},
+%           width=7cm, height=4.5cm,
+%           xlabel style={font=\small},
+%           ylabel style={font=\small},
+%           tick label style={font=\small},
+%           grid=major, grid style={dashed, gray!30},
+%           title={Movement conflict rate per episode},
+%           title style={font=\small},
+%         ]
+%           % TODO: replace with real clash_rate from /episode_stats
+%           \addplot[thick, color=dhlGrey, mark=*, mark size=2pt]
+%             coordinates {(1,5.2)(2,4.8)(3,4.1)(4,3.9)(5,3.5)
+%                          (6,3.3)(7,3.6)(8,3.1)(9,3.0)(10,2.9)};
+%         \end{axis}
+%       \end{tikzpicture}
+%     \end{column}
+%     \begin{column}{0.42\textwidth}
+%       \vspace{1em}
+%       \begin{itemize}
+%         \item Clash rate \kpi{below 5\%} across all episodes
+%         \item Conflict resolution is automatic - bots retry with collision-avoidance
+%         \item Rate decreases as bots settle into stable routing patterns
+%         \item No deadlocks observed in simulation runs
+%       \end{itemize}
+%     \end{column}
+%   \end{columns}
+% \end{frame}
+
+% ── Slide 13: Summary Table ───────────────────────────────────────────────────
+% \begin{frame}{Baseline Performance Summary}
+%   \begin{center}
+%   \renewcommand{\arraystretch}{0.6}
+%   \begin{tabular}{>{\bfseries}p{4cm} p{3cm} p{3cm}}
+%     \toprule
+%     KPI & Simulation (3 bots) & Manual Baseline \\
+%     \midrule
+%     \rowcolor{dhlRed!8}
+%     UPH (total fleet)    & $\sim$\kpi{240}   & 150 (1 picker) \\
+%     UPH per bot          & $\sim$80           & - \\
+%     \rowcolor{dhlRed!8}
+%     Bot Utilisation      & $\sim$75\%         & - \\
+%     Avg Distance / Bot   & $\sim$350 steps/ep & - \\
+%     \rowcolor{dhlRed!8}
+%     Clash Rate           & $<$4\%             & - \\
+%     Deliveries / Episode & $\sim$35           & - \\
+%     \bottomrule
+%   \end{tabular}
+%   \end{center}
+%   \vspace{0.5em}
+%   \small\textit{All simulation figures are baseline values from the current heuristic controller.
+%   \\ % TODO: update table with real values from Streamlit stats export before presenting
+%   Numbers will improve with order sequencer integration and storage policy optimisation.}
+% \end{frame}
+% % ══════════════════════════════════════════════════════════════════════════════
+\section{Roadmap}
+% ══════════════════════════════════════════════════════════════════════════════
+
+% ── Slide 14: Roadmap ─────────────────────────────────────────────────────────
+\begin{frame}{What's Next}
+  \begin{columns}[T]
+    \begin{column}{0.48\textwidth}
+      \textbf{Near-term}
+      \vspace{0.4em}
+      \begin{enumerate}
+        \item \textbf{Movement} - Fix small bugs that occur in the warehouse
+        \item \textbf{Simulations} - Run on full data
+      \end{enumerate}
+    \end{column}
+    \begin{column}{0.48\textwidth}
+      \textbf{Medium-term}
+      \vspace{0.4em}
+      \begin{enumerate}
+        \setcounter{enumi}{2}
+        \item \textbf{Statistics} - Extract and validate model statistics
+      \end{enumerate}
+    \end{column}
+  \end{columns}
+  \vspace{0.8em}
+  \begin{block}{Goal}
+    By end of April: full simulation replay of real DHL operational days, with validated throughput projections per bot fleet size.
+  \end{block}
+\end{frame}
+
+% ── Slide 15: Thank You ───────────────────────────────────────────────────────
+{
+\setbeamercolor{background canvas}{bg=dhlRed}
+\setbeamercolor{normal text}{fg=white}
+\begin{frame}[plain]
+  \vspace{2em}
+  \begin{center}
+    {\Huge\color{dhlYellow}\textbf{Thank You}}\\[1em]
+    {\large\color{white} Questions?}\\[2em]
+    \color{white!80}\small
+    Simulation live at \texttt{tarware.nasrudeen.com}\\[0.3em]
+    % TODO: add team emails / GitHub repo link
+  \end{center}
+\end{frame}
+}
+
+\end{document}
