@@ -1,11 +1,8 @@
-import asyncio
 import base64
 import io
-import json
 import os
 import threading
 import time
-from collections import deque
 
 import numpy as np
 from fastapi import FastAPI
@@ -14,32 +11,18 @@ from fastapi.responses import StreamingResponse
 from PIL import Image
 
 os.environ.setdefault("DISPLAY", ":99")
+# Tile size for rendering — picked up by tarware.rendering.Viewer at init time
+os.environ.setdefault("TARWARE_RENDER_TILE_SIZE", "60")
 
 import gymnasium as gym
-import tarware  # noqa: F401
-
-# ── Monkey-patch Viewer for higher resolution ─────────────────────────────────
-import tarware.rendering as _r
-
-_GRID_SIZE = int(os.environ.get("GRID_SIZE", "60"))
-_original_viewer_init = _r.Viewer.__init__
-
-def _patched_viewer_init(self, world_size):
-    _original_viewer_init(self, world_size)
-    self.grid_size = _GRID_SIZE
-    self.icon_size = _GRID_SIZE * 2 // 3
-    self.width = 1 + self.cols * (self.grid_size + 1)
-    self.height = 1 + self.rows * (self.grid_size + 1)
-    self.window.set_size(self.width, self.height)
-
-_r.Viewer.__init__ = _patched_viewer_init
-# ─────────────────────────────────────────────────────────────────────────────
+import tarware  # noqa: F401 — registers the env via env vars at import time
 
 app = FastAPI()
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
 all_frames: list = []          # stores every frame across all episodes
 episode_boundaries: list = []  # frame index where each episode starts
+all_episode_stats: list = []   # one dict per completed episode
 sim_stats: dict = {}
 sim_lock = threading.Lock()
 sim_thread: threading.Thread | None = None
@@ -47,6 +30,9 @@ sim_done = threading.Event()
 
 
 FRAME_SCALE = float(os.environ.get("FRAME_SCALE", "0.6"))
+# When HEADLESS, skip env.render() + JPEG encode + frame buffering on every step.
+# Used by the fleet tuner to run KPI-only sweeps without paying rendering cost.
+HEADLESS = os.environ.get("TARWARE_HEADLESS", "0") == "1"
 
 def frame_to_jpeg_b64(frame: np.ndarray) -> str:
     img = Image.fromarray(frame.astype("uint8"), "RGB")
@@ -59,139 +45,119 @@ def frame_to_jpeg_b64(frame: np.ndarray) -> str:
 
 
 def simulation_loop(env_name: str, num_episodes: int):
-    from collections import OrderedDict
-    from tarware.heuristic import MissionType, Mission
-    from tarware.utils.utils import flatten_list, split_list
-    from tarware.warehouse import AgentType
+    from tarware.heuristic import heuristic_episode
+    from tarware.definitions import Action
 
     sim_done.clear()
     env = gym.make(env_name)
-    episode = 0
+    env_raw = env.unwrapped
 
-    while episode < num_episodes:
-        env_raw = env.unwrapped
-        _ = env_raw.reset(seed=episode)
+    steps_per_sim_second = float(os.environ.get("TARWARE_STEPS_PER_SIMULATED_SECOND", "1.0"))
+    seconds_per_step = 1.0 / steps_per_sim_second if steps_per_sim_second > 0 else 1.0
 
-        non_goal_location_ids = []
-        for id_, coords in env_raw.action_id_to_coords_map.items():
-            if (coords[1], coords[0]) not in env_raw.goals:
-                non_goal_location_ids.append(id_)
-        non_goal_location_ids = np.array(non_goal_location_ids)
-        location_map = env_raw.action_id_to_coords_map
-        coords_original_loc_map = {v: k for k, v in env_raw.action_id_to_coords_map.items()}
-
-        agents = env_raw.agents
-        agvs = [a for a in agents if a.type == AgentType.AGV]
-        pickers = [a for a in agents if a.type == AgentType.PICKER]
-        sections = env_raw.rack_groups
-        picker_sections = split_list(sections, len(pickers))
-        picker_sections = [flatten_list(l) for l in picker_sections]
-
-        assigned_agvs = OrderedDict()
-        assigned_pickers = OrderedDict()
-        assigned_items = OrderedDict()
-
-        done = False
-        timestep = 0
-        ep_return = 0.0
-        ep_deliveries = 0
-        start = time.time()
-
-        # Render and discard the first frame of each episode — it renders clipped
-        # due to Xvfb/pyglet initialization timing
-        _throwaway = env_raw.render(mode="rgb_array")
+    for episode in range(num_episodes):
+        # Warm up the renderer before heuristic_episode's internal reset.
+        # The first render of a new pyglet viewer is clipped under Xvfb timing.
+        # Skip in headless mode so the pyglet viewer is never instantiated.
+        env_raw.reset(seed=episode)
+        if not HEADLESS:
+            _ = env_raw.render(mode="rgb_array")
 
         with sim_lock:
             episode_boundaries.append(len(all_frames))
 
-        while not done:
-            request_queue = env_raw.request_queue
-            goal_locations = env_raw.goals
-            actions = {k: 0 for k in agents}
+        ep_state = {
+            "deliveries": 0,
+            "items_picked": 0,
+            "agv_idle": 0,
+            "clashes": 0,
+            "stucks": 0,
+            "distance": 0,
+            "timesteps": 0,
+        }
+        # Per-AGV last-known position so we can derive AGV-only distance from
+        # actual displacement (env's `info["agvs_distance_travelled"]` is
+        # misnamed — it actually counts moves across all agents including
+        # pickers, so we can't trust it once num_pickers > 0).
+        agv_prev_positions: dict = {}
+        start = time.time()
 
-            for item in request_queue:
-                if item.id in assigned_items.values():
-                    continue
-                available_agvs = [a for a in agvs if not a.busy and not a.carrying_shelf and a not in assigned_agvs]
-                if not available_agvs:
-                    continue
-                agv_paths = [env_raw.find_path((a.y, a.x), (item.y, item.x), a, care_for_agents=False) for a in available_agvs]
-                closest_agv = available_agvs[np.argmin([len(p) for p in agv_paths])]
-                item_loc_id = coords_original_loc_map[(item.y, item.x)]
-                assigned_agvs[closest_agv] = Mission(MissionType.PICKING, item_loc_id, item.x, item.y, timestep)
-                assigned_items[closest_agv] = item.id
+        def on_step(env_, info, _state=ep_state, _prev=agv_prev_positions, **_kwargs):
+            if not HEADLESS:
+                frame = env_.render(mode="rgb_array")
+                if frame is not None:
+                    with sim_lock:
+                        all_frames.append(frame_to_jpeg_b64(frame))
 
-            for agv in agvs:
-                if agv in assigned_agvs and (agv.x == assigned_agvs[agv].location_x) and (agv.y == assigned_agvs[agv].location_y):
-                    assigned_agvs[agv].at_location = True
-                if agv not in assigned_agvs or agv.busy:
-                    continue
-                m = assigned_agvs[agv]
-                if m.mission_type == MissionType.PICKING and m.at_location and agv.carrying_shelf:
-                    goal_paths = [env_raw.find_path((agv.y, agv.x), (y, x), agv, care_for_agents=False) for (x, y) in goal_locations]
-                    closest_goal = goal_locations[np.argmin([len(p) for p in goal_paths])]
-                    goal_loc_id = coords_original_loc_map[(closest_goal[1], closest_goal[0])]
-                    assigned_agvs[agv] = Mission(MissionType.DELIVERING, goal_loc_id, closest_goal[0], closest_goal[1], timestep)
-                m = assigned_agvs[agv]
-                if m.mission_type == MissionType.DELIVERING and m.at_location and agv.carrying_shelf:
-                    empty_shelves = env_raw.get_empty_shelf_information()
-                    empty_ids = [i for i in list(non_goal_location_ids[empty_shelves > 0])
-                                 if i not in [ms.location_id for ms in assigned_agvs.values()]]
-                    empty_yx = [location_map[i] for i in empty_ids]
-                    empty_paths = [env_raw.find_path((agv.y, agv.x), (y, x), agv, care_for_agents=False) for (y, x) in empty_yx]
-                    closest_id = empty_ids[np.argmin([len(p) for p in empty_paths])]
-                    closest_yx = location_map[closest_id]
-                    assigned_agvs[agv] = Mission(MissionType.RETURNING, closest_id, closest_yx[1], closest_yx[0], timestep)
-                m = assigned_agvs[agv]
-                if m.mission_type == MissionType.RETURNING and m.at_location and not agv.carrying_shelf:
-                    assigned_agvs.pop(agv)
-                    assigned_items.pop(agv)
+            # AGV-only metrics derived from per-agent state. Agents are
+            # stored AGVs-first, then pickers, so slicing by num_agvs is
+            # safe.
+            n_agvs = env_.num_agvs
+            agvs = env_.agents[:n_agvs]
+            agv_idle = sum(
+                1 for a in agvs
+                if a.req_action in (Action.NOOP, Action.TOGGLE_LOAD)
+            )
+            agv_distance = 0
+            for a in agvs:
+                prev = _prev.get(a.id)
+                if prev is not None:
+                    agv_distance += abs(a.x - prev[0]) + abs(a.y - prev[1])
+                _prev[a.id] = (a.x, a.y)
 
-            for agv, mission in assigned_agvs.items():
-                if mission.mission_type in [MissionType.PICKING, MissionType.RETURNING]:
-                    in_zone = [(mission.location_y, mission.location_x) in p for p in picker_sections]
-                    if True in in_zone:
-                        relevant_picker = pickers[in_zone.index(True)]
-                        if relevant_picker not in assigned_pickers:
-                            assigned_pickers[relevant_picker] = Mission(MissionType.PICKING, mission.location_id, mission.location_x, mission.location_y, timestep)
+            _state["deliveries"]   += info.get("shelf_deliveries", 0)
+            _state["items_picked"] += info.get("items_picked", 0)
+            _state["agv_idle"]     += agv_idle
+            _state["clashes"]      += info.get("clashes", 0)
+            _state["stucks"]       += info.get("stucks", 0)
+            _state["distance"]     += agv_distance
+            _state["timesteps"]    += 1
 
-            for picker in pickers:
-                if picker in assigned_pickers and (picker.x == assigned_pickers[picker].location_x) and (picker.y == assigned_pickers[picker].location_y):
-                    assigned_pickers[picker].at_location = True
-                    assigned_pickers.pop(picker)
-
-            for agv, mission in assigned_agvs.items():
-                actions[agv] = mission.location_id if not agv.busy else 0
-            for picker, mission in assigned_pickers.items():
-                actions[picker] = mission.location_id
-
-            frame = env_raw.render(mode="rgb_array")
-            if frame is not None:
-                with sim_lock:
-                    all_frames.append(frame_to_jpeg_b64(frame))
-
-            _, reward, terminated, truncated, info = env_raw.step(list(actions.values()))
-            done = all(terminated) or all(truncated)
-            ep_return += float(np.sum(reward))
-            ep_deliveries += info.get("shelf_deliveries", 0)
-            timestep += 1
+        _, global_return, _ = heuristic_episode(env_raw, seed=episode, step_callback=on_step)
 
         elapsed = time.time() - start
+        timestep = ep_state["timesteps"]
         fps = timestep / elapsed if elapsed > 0 else 0
-        pick_rate = ep_deliveries * 3600 / (5 * timestep) if timestep > 0 else 0
+        # Throughputs are per *simulated* hour. Each step represents
+        # `seconds_per_step` simulated seconds.
+        # bin_throughput  = AGV bins delivered to pickerwall.
+        # pick_throughput = picker units physically removed from bins.
+        bin_throughput = (
+            ep_state["deliveries"] * 3600 / (seconds_per_step * timestep)
+            if timestep > 0 else 0
+        )
+        pick_throughput = (
+            ep_state["items_picked"] * 3600 / (seconds_per_step * timestep)
+            if timestep > 0 else 0
+        )
+
+        n_agvs = env_raw.num_agvs
+        agv_util = round(100 * (1 - ep_state["agv_idle"] / max(n_agvs * timestep, 1)), 1)
+        clash_rate = round(ep_state["clashes"] / max(timestep, 1) * 100, 2)
+        distance_per_bot = round(ep_state["distance"] / n_agvs, 1) if n_agvs > 0 else 0
+
+        ep_stat = {
+            "episode": episode,
+            "bin_throughput": round(bin_throughput, 2),
+            "pick_throughput": round(pick_throughput, 2),
+            "global_return": round(float(global_return), 2),
+            "deliveries": ep_state["deliveries"],
+            "items_picked": ep_state["items_picked"],
+            "fps": round(fps, 2),
+            "timesteps": timestep,
+            "agv_utilization": agv_util,
+            "clash_rate": clash_rate,
+            "stucks": ep_state["stucks"],
+            "distance_per_bot": distance_per_bot,
+        }
 
         with sim_lock:
+            all_episode_stats.append(ep_stat)
             sim_stats.update({
                 "episode": episode,
                 "num_episodes": num_episodes,
-                "timesteps": timestep,
-                "global_return": round(ep_return, 2),
-                "deliveries": ep_deliveries,
-                "pick_rate": round(pick_rate, 2),
-                "fps": round(fps, 2),
+                **ep_stat,
             })
-
-        episode += 1
 
     env.close()
     sim_done.set()
@@ -209,7 +175,7 @@ def simulation_loop(env_name: str, num_episodes: int):
 @app.post("/start")
 def start(num_episodes: int = 10):
     global sim_thread
-    env_name = os.environ.get("TARWARE_ENV", "tarware-tiny-3agvs-2pickers-partialobs-v1")
+    env_name = tarware.ENV_ID
     sim_thread = threading.Thread(
         target=simulation_loop, args=(env_name, num_episodes), daemon=True
     )
@@ -230,11 +196,21 @@ def get_status():
 
 
 @app.get("/frames/{episode}")
-def get_episode_frames(episode: int):
-    """Return frames for a single completed episode (0-indexed)."""
+def get_episode_frames(episode: int, since: int = 0):
+    """Return frames for an episode (0-indexed).
+
+    With `?since=N`, returns only frames at offset N+ *within the episode*.
+    Used by the player to stream in-progress episodes incrementally instead
+    of waiting for the entire episode to complete.
+
+    Response includes `next_since` so the client can pass it back on the
+    next call, and `is_complete` so the client knows when to advance to
+    the next episode (a later boundary has been appended OR sim_done).
+    """
     with sim_lock:
         boundaries = list(episode_boundaries)
         total_frames = len(all_frames)
+        done_flag = sim_done.is_set()
 
     if episode >= len(boundaries):
         from fastapi import HTTPException
@@ -242,20 +218,19 @@ def get_episode_frames(episode: int):
 
     start = boundaries[episode]
     end = boundaries[episode + 1] if episode + 1 < len(boundaries) else total_frames
+    is_complete = (episode + 1 < len(boundaries)) or done_flag
 
-    # If this is the last known episode and sim isn't done, only return it when
-    # the next boundary (or sim_done) confirms it's fully recorded
-    if episode + 1 >= len(boundaries) and not sim_done.is_set():
-        from fastapi import HTTPException
-        raise HTTPException(status_code=404, detail="Episode not yet complete")
-
+    abs_start = min(end, start + max(0, since))
     with sim_lock:
-        frames = list(all_frames[start:end])
+        frames = list(all_frames[abs_start:end])
 
     return {
         "episode": episode,
         "frames": frames,
         "start_frame": start,
+        "since": since,
+        "next_since": end - start,
+        "is_complete": is_complete,
     }
 
 
@@ -276,7 +251,15 @@ def get_stats():
         return dict(sim_stats)
 
 
+@app.get("/episode_stats")
+def get_episode_stats():
+    with sim_lock:
+        return {
+            "episode_stats": list(all_episode_stats),
+            "done": sim_done.is_set(),
+        }
+
+
 @app.get("/health")
 def health():
     return {"status": "ok"}
-
