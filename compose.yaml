@@ -23,7 +23,26 @@ services:
       DOCKER_NETWORK: "tarware_net"
       SIM_IMAGE: "tarware-simulation:latest"
       SIM_BUILD_CONTEXT: "/sim-src"
-      TARWARE_ENV: "tarware-tiny-3agvs-2pickers-partialobs-v1"
+      # TA-RWARE configuration — passed through to spawned sim containers
+      TARWARE_MAP_NAME: "tiny"
+      TARWARE_AGVS: "3"
+      TARWARE_PICKERS: "0"
+      TARWARE_OBS_TYPE: "partial"
+      TARWARE_RENDER_TILE_SIZE: "30"
+      # Auto-fit canvas: tile size is computed so the map fits within these dims.
+      # Solves two issues: big maps overflowing Xvfb, and tiny maps rendering at
+      # too-low resolution. fit_width/fit_height kwargs in tarware/__init__.py
+      # take precedence over TARWARE_RENDER_TILE_SIZE when both are set.
+      TARWARE_RENDER_WIDTH: "1600"
+      TARWARE_RENDER_HEIGHT: "1200"
+      TARWARE_REWARD_TYPE: "individual"
+      TARWARE_MAP_CSV_PATH: "/app/tarware/data/maps/tiny.csv"
+      TARWARE_ORDER_CSV_PATH: "/app/tarware/data/processed/order_data_sample.csv"
+      TARWARE_ABC_CSV_PATH: "/app/tarware/data/processed/abc_data_sample.csv"
+      TARWARE_STEPS_PER_SIMULATED_SECOND: "0.25"
+      # Disable the post-render JPEG downscale (was 0.6). With fit_width/height
+      # bounding the canvas, frames are already a reasonable size.
+      FRAME_SCALE: "1.0"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - /home/nas/shared/containers/tarware-docker/simulation:/sim-src:ro
@@ -46,6 +65,11 @@ services:
     environment:
       MANAGER_URL: "http://manager:8001"
       MANAGER_PUBLIC_URL: "https://tarware.nasrudeen.com/manager"
+      # Fleet-tuner master switch. Set to "1" only on local-development compose;
+      # do NOT enable on any deployment that exposes Streamlit publicly via
+      # Pangolin. The tuner page also performs a private-IP check on top of
+      # this, but the env var is the load-bearing lock.
+      TUNER_ENABLED: "1"
     ports:
       - "8501:8501"
     networks:
