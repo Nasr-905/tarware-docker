@@ -15,6 +15,7 @@ import os
 import uuid
 import time
 import threading
+from pathlib import Path
 from typing import Dict, Optional
 
 import docker
@@ -32,8 +33,40 @@ docker_client = docker.from_env()
 
 NETWORK_NAME = os.environ.get("DOCKER_NETWORK", "tarware_net")
 SIM_IMAGE = os.environ.get("SIM_IMAGE", "tarware-simulation:latest")
-TARWARE_ENV = os.environ.get("TARWARE_ENV", "tarware-tiny-3agvs-2pickers-partialobs-v1")
 SIM_CONTAINER_PREFIX = "tarware_sim_"
+
+# TA-RWARE env vars forwarded to every spawned sim container
+_map_name = os.environ.get("TARWARE_MAP_NAME", "tiny")
+_TARWARE_SIM_ENV = {
+    k: os.environ[k]
+    for k in (
+        "TARWARE_MAP_NAME",
+        "TARWARE_AGVS",
+        "TARWARE_PICKERS",
+        "TARWARE_OBS_TYPE",
+        "TARWARE_RENDER_TILE_SIZE",
+        "TARWARE_REWARD_TYPE",
+        "TARWARE_ORDER_CSV_PATH",
+        "TARWARE_ABC_CSV_PATH",
+        "TARWARE_STEPS_PER_SIMULATED_SECOND",
+        "TARWARE_MAX_STEPS",
+        "TARWARE_REQUEST_QUEUE_SIZE",
+        "TARWARE_MAP_JSON_PATH",
+        "TARWARE_RENDER_WIDTH",
+        "TARWARE_RENDER_HEIGHT",
+        "FRAME_SCALE",
+    )
+    if k in os.environ
+}
+# Always compute MAP_CSV_PATH and MAP_JSON_PATH from the map name so they stay in sync
+_TARWARE_SIM_ENV["TARWARE_MAP_CSV_PATH"] = (
+    os.environ.get("TARWARE_MAP_CSV_PATH")
+    or f"/app/tarware/data/maps/{_map_name}.csv"
+)
+_TARWARE_SIM_ENV["TARWARE_MAP_JSON_PATH"] = (
+    os.environ.get("TARWARE_MAP_JSON_PATH")
+    or f"/app/tarware/data/maps/{_map_name}.json"
+)
 
 sessions: Dict[str, dict] = {}
 sessions_lock = threading.Lock()
@@ -85,6 +118,25 @@ threading.Thread(target=_gc_loop, daemon=True).start()
 class SessionRequest(BaseModel):
     num_episodes: int = 10
     env_name: Optional[str] = None
+    map_name: Optional[str] = None
+    num_agvs: Optional[int] = None
+    num_pickers: Optional[int] = None
+    headless: bool = False  # skip frame rendering for KPI-only sweeps (fleet tuner)
+
+
+@app.get("/maps")
+def list_maps():
+    """List all available map names from the mounted simulation source.
+
+    Consumers (simulator, tuner) decide their own UI exclusions.
+    `full_dhl` is too large for the live-playback simulator but valid for
+    the headless tuner."""
+    maps_dir = Path("/sim-src/tarware/data/maps")
+    try:
+        maps = sorted(p.stem for p in maps_dir.glob("*.csv"))
+    except Exception:
+        maps = []
+    return {"maps": maps}
 
 
 def build_sim_image() -> bool:
@@ -150,6 +202,18 @@ def proxy_sim_status(session_id: str):
         raise HTTPException(status_code=502, detail=f"Sim unreachable: {e}")
 
 
+@app.get("/sim/{session_id}/episode_stats")
+def proxy_sim_episode_stats(session_id: str):
+    with sessions_lock:
+        if session_id not in sessions:
+            raise HTTPException(status_code=404, detail="Session not found")
+    try:
+        r = req_lib.get(f"{get_sim_url(session_id)}/episode_stats", timeout=10)
+        return JSONResponse(content=r.json(), status_code=r.status_code)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Sim unreachable: {e}")
+
+
 @app.get("/sim/{session_id}/frames/{episode}")
 def proxy_sim_episode(session_id: str, episode: int):
     with sessions_lock:
@@ -168,7 +232,6 @@ def proxy_sim_episode(session_id: str, episode: int):
 def create_session(req: SessionRequest):
     session_id = uuid.uuid4().hex[:8]
     container_name = f"{SIM_CONTAINER_PREFIX}{session_id}"
-    env_name = req.env_name or TARWARE_ENV
 
     # Clean up stale containers
     try:
@@ -179,6 +242,18 @@ def create_session(req: SessionRequest):
     except Exception as e:
         print(f"[manager] Warning during stale cleanup: {e}", flush=True)
 
+    session_env = dict(_TARWARE_SIM_ENV)
+    if req.map_name:
+        session_env["TARWARE_MAP_NAME"] = req.map_name
+        session_env["TARWARE_MAP_CSV_PATH"] = f"/app/tarware/data/maps/{req.map_name}.csv"
+        session_env["TARWARE_MAP_JSON_PATH"] = f"/app/tarware/data/maps/{req.map_name}.json"
+    if req.num_agvs is not None:
+        session_env["TARWARE_AGVS"] = str(req.num_agvs)
+    if req.num_pickers is not None:
+        session_env["TARWARE_PICKERS"] = str(req.num_pickers)
+    if req.headless:
+        session_env["TARWARE_HEADLESS"] = "1"
+
     try:
         container = docker_client.containers.run(
             image=SIM_IMAGE,
@@ -186,7 +261,7 @@ def create_session(req: SessionRequest):
             detach=True,
             network=NETWORK_NAME,
             environment={
-                "TARWARE_ENV": env_name,
+                **session_env,
                 "DISPLAY": ":99",
                 "MANAGER_URL": "http://manager:8001",
                 "SESSION_ID": session_id,
@@ -221,7 +296,7 @@ def create_session(req: SessionRequest):
             "session_id": session_id,
             "container_name": container_name,
             "container_id": container.id,
-            "env_name": env_name,
+            "env_name": str(_TARWARE_SIM_ENV),
             "num_episodes": req.num_episodes,
             "sim_url": sim_url,
             "created_at": time.time(),
@@ -252,7 +327,6 @@ def create_session(req: SessionRequest):
         "session_id": session_id,
         "sim_url": sim_url,
         "status": "starting",
-        "env_name": env_name,
         "num_episodes": req.num_episodes,
     }
 
