@@ -39,7 +39,11 @@ services:
       TARWARE_MAP_CSV_PATH: "/app/tarware/data/maps/tiny.csv"
       TARWARE_ORDER_CSV_PATH: "/app/tarware/data/processed/order_data_sample.csv"
       TARWARE_ABC_CSV_PATH: "/app/tarware/data/processed/abc_data_sample.csv"
-      TARWARE_STEPS_PER_SIMULATED_SECOND: "0.25"
+      TARWARE_STEPS_PER_SIMULATED_SECOND: "2"
+      # Run-to-completion: -1 means "end the episode when the order
+      # sequencer drains and the pickerwall is empty" (aaj/update behavior).
+      # Use a positive integer for a classic step cap.
+      TARWARE_MAX_STEPS: "-1"
       # Disable the post-render JPEG downscale (was 0.6). With fit_width/height
       # bounding the canvas, frames are already a reasonable size.
       FRAME_SCALE: "1.0"
