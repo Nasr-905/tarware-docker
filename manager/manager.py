@@ -57,6 +57,8 @@ _TARWARE_SIM_ENV = {
         "TARWARE_MAX_INACTIVITY_STEPS",
         "TARWARE_PICK_BASE_TICKS",
         "TARWARE_AGV_TRANSFER_BASE_SECONDS",
+        "TARWARE_PICKER_MODEL",
+        "TARWARE_ABSTRACT_PICKER_UPH",
         "FRAME_SCALE",
     )
     if k in os.environ
@@ -88,11 +90,14 @@ def _gc_loop():
         time.sleep(GC_INTERVAL_SECONDS)
         now = time.time()
 
-        # 1. Reap tracked sessions that have exceeded the TTL
+        # 1. Reap tracked sessions that have exceeded the TTL.
+        # Headless (tuner) sessions are exempt — they can run for hours and
+        # the user cleans them up manually (tuner is local-only).
         with sessions_lock:
             stale = [
                 sid for sid, s in sessions.items()
-                if now - s["created_at"] > ORPHAN_TTL_SECONDS
+                if not s.get("exempt_from_gc")
+                and now - s["created_at"] > ORPHAN_TTL_SECONDS
             ]
         for sid in stale:
             print(f"[manager] GC: removing stale session {sid} (>{ORPHAN_TTL_SECONDS}s old)", flush=True)
@@ -126,6 +131,8 @@ class SessionRequest(BaseModel):
     num_pickers: Optional[int] = None
     order_csv: Optional[str] = None  # filename only (e.g. "order_data_sample"); resolved against /app/tarware/data/processed/
     headless: bool = False  # skip frame rendering for KPI-only sweeps (fleet tuner)
+    picker_model: Optional[str] = None  # "abstract" or "physical"
+    abstract_picker_uph: Optional[float] = None
 
 
 @app.get("/maps")
@@ -277,6 +284,15 @@ def create_session(req: SessionRequest):
         session_env["TARWARE_ORDER_CSV_PATH"] = f"/app/tarware/data/processed/{req.order_csv}.csv"
     if req.headless:
         session_env["TARWARE_HEADLESS"] = "1"
+    if req.picker_model:
+        if req.picker_model not in ("abstract", "physical"):
+            raise HTTPException(
+                status_code=400,
+                detail=f"picker_model must be 'abstract' or 'physical', got {req.picker_model!r}",
+            )
+        session_env["TARWARE_PICKER_MODEL"] = req.picker_model
+    if req.abstract_picker_uph is not None:
+        session_env["TARWARE_ABSTRACT_PICKER_UPH"] = str(req.abstract_picker_uph)
 
     try:
         container = docker_client.containers.run(
@@ -325,6 +341,10 @@ def create_session(req: SessionRequest):
             "sim_url": sim_url,
             "created_at": time.time(),
             "status": "starting",
+            # Headless sessions = fleet-tuner runs. They can take hours on
+            # full_dhl and outlive the orphan TTL; the user manages cleanup
+            # manually since the tuner is local-only.
+            "exempt_from_gc": bool(req.headless),
         }
 
     def _start_sim():

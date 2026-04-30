@@ -248,7 +248,7 @@ dashboard.
 
 | Knob                          | Effect                              |
 |-------------------------------|--------------------------------------|
-| `TARWARE_OBS_TYPE`            | Observation space (RL only); heuristic ignores |
+| `TARWARE_OBS_TYPE`            | Observation space. `partial`/`global` for RL; `none` skips observation construction entirely (faster, but the env returns dummy `0`s). Heuristic ignores either way. |
 | `TARWARE_RENDER_TILE_SIZE`    | Frame pixel size                     |
 | `TARWARE_RENDER_WIDTH/HEIGHT` | Auto-fit canvas (frame size only)    |
 | `FRAME_SCALE`                 | JPEG resize factor (memory only)     |

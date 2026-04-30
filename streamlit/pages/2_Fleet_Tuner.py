@@ -76,6 +76,7 @@ defaults = {
     # session_id -> {"picker": int, "agvs": int, "started_at": float}
     "tuner_active_sessions": {},
     "tuner_stop": False,
+    "tuner_was_stopped": False,  # distinguishes user-stop from natural completion in the post-run banner
     "tuner_config": None,
     "tuner_total_planned": 0,
 }
@@ -95,6 +96,7 @@ if st.session_state.tuner_stop:
     st.session_state.tuner_running = False
     st.session_state.tuner_rows = {}
     st.session_state.tuner_stop = False
+    st.session_state.tuner_was_stopped = True
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -118,7 +120,9 @@ def get_order_datasets() -> list[str]:
 
 
 def spawn_session(map_name: str, num_agvs: int, num_pickers: int,
-                  episodes: int, order_csv: str | None = None) -> str | None:
+                  episodes: int, order_csv: str | None = None,
+                  picker_model: str | None = None,
+                  abstract_picker_uph: float | None = None) -> str | None:
     """Create a headless sim session and return its session_id, or None on
     transient failure (the caller can retry on the next tick)."""
     payload = {
@@ -130,6 +134,10 @@ def spawn_session(map_name: str, num_agvs: int, num_pickers: int,
     }
     if order_csv:
         payload["order_csv"] = order_csv
+    if picker_model:
+        payload["picker_model"] = picker_model
+    if abstract_picker_uph is not None:
+        payload["abstract_picker_uph"] = float(abstract_picker_uph)
     try:
         r = requests.post(f"{MANAGER_URL}/session", json=payload, timeout=15)
         if r.status_code == 503 and r.json().get("detail") == "building":
@@ -241,6 +249,23 @@ with st.sidebar:
                                  disabled=not enabled)
     picker_max = st.number_input("Pickers (max)", min_value=0, max_value=200, value=10,
                                  disabled=not enabled)
+    picker_model = st.selectbox(
+        "Picker model",
+        options=["abstract", "physical"],
+        index=0,
+        disabled=not enabled,
+        help=("`abstract` replaces physical pickers with a constant-rate "
+              "FIFO drain (default 150 UPH/picker) — much faster, no A* "
+              "or collision resolution. `physical` keeps the legacy "
+              "Picker entity simulation."),
+    )
+    abstract_picker_uph = st.number_input(
+        "Abstract picker UPH",
+        min_value=1.0, max_value=10000.0, value=150.0, step=10.0,
+        disabled=(not enabled) or (picker_model == "physical"),
+        help="Items-per-hour each abstract picker drains from the "
+             "pickerwall. 150 is the documented design assumption.",
+    )
     episodes_per_combo = st.number_input(
         "Episodes per combo (seeds)", min_value=1, max_value=10, value=3,
         disabled=not enabled,
@@ -312,6 +337,7 @@ if start_clicked:
         st.session_state.tuner_results = []
         st.session_state.tuner_active_sessions = {}
         st.session_state.tuner_running = True
+        st.session_state.tuner_was_stopped = False
         st.session_state.tuner_total_planned = total
         st.session_state.tuner_config = {
             "map_name": map_name,
@@ -321,6 +347,8 @@ if start_clicked:
             "plateau_tolerance": float(plateau_tolerance_pct) / 100.0,
             "plateau_streak": int(plateau_streak),
             "concurrency": int(concurrency),
+            "picker_model": picker_model,
+            "abstract_picker_uph": float(abstract_picker_uph),
         }
         st.rerun()
 
@@ -427,11 +455,17 @@ if st.session_state.tuner_running and cfg:
              f"(in flight: {in_flight}, pruned: {pruned})",
     )
 elif cfg and not st.session_state.tuner_running and st.session_state.tuner_results:
-    status_box.success(
-        f"Tuner finished. {len(st.session_state.tuner_results)} combos run "
-        f"out of {st.session_state.tuner_total_planned} planned "
-        f"(rest pruned by plateau detection)."
-    )
+    if st.session_state.tuner_was_stopped:
+        status_box.warning(
+            f"Tuner stopped. {len(st.session_state.tuner_results)} combos completed "
+            f"before stop (out of {st.session_state.tuner_total_planned} planned)."
+        )
+    else:
+        status_box.success(
+            f"Tuner finished. {len(st.session_state.tuner_results)} combos run "
+            f"out of {st.session_state.tuner_total_planned} planned "
+            f"(rest pruned by plateau detection)."
+        )
 
 render_outputs()
 
@@ -535,6 +569,8 @@ if st.session_state.tuner_running and cfg:
             sid = spawn_session(
                 cfg["map_name"], agv, picker, cfg["episodes_per_combo"],
                 order_csv=cfg.get("order_csv"),
+                picker_model=cfg.get("picker_model"),
+                abstract_picker_uph=cfg.get("abstract_picker_uph"),
             )
             if sid is None:
                 # Manager refused (e.g. building) — re-queue and retry next tick.
