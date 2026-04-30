@@ -128,24 +128,33 @@ sweep depending on where saturation occurs.
 
 ### Concurrency model
 
-Row-parallel, sequential-within-row:
+Parallel within each row, with speculative execution:
 
 - Each picker count is a "row" with its own ascending AGV queue.
-- Multiple rows run **concurrently** up to `Concurrent sims`.
-- Within a single row, AGV combos run **sequentially** so plateau detection
-  observes results in order (no wasted runs from late arrivals).
+- AGV combos for the same picker count run **concurrently** (multiple
+  sims per row at once) — no sequential-within-row constraint.
+- Plateau detection still observes results in **AGV-ascending order**:
+  finished sims land in a per-row buffer and are processed in sequence.
+- When a row plateaus, in-flight speculative sessions past the plateau
+  point are immediately cancelled (`DELETE /session/{id}`) so their
+  slots flow to other active rows right away.
+- Slot allocation is round-robin across active rows in ascending picker
+  order — lower picker counts get priority but every row contributes.
 
 On each tuner tick (~2 s):
 
 1. Poll every in-flight session's `/status`.
-2. For each finished session: pull `/episode_stats`, compute averages,
-   apply plateau check to that row, advance the row's queue.
-3. Spawn new sessions for any row that has work and no in-flight session,
-   up to the concurrency cap.
+2. For each finished session: pull `/episode_stats`, append to global
+   results, stash in the row's results_buffer keyed by AGV count.
+3. Drain each row's buffer in AGV-ascending order, plateau-checking as
+   we go. If plateau triggers, cancel speculative in-flights past the
+   plateau point.
+4. Spawn new sessions round-robin across active rows up to the cap.
 
-This means up to `min(num_picker_rows, concurrency)` sims run at once.
-With `picker_min=0, picker_max=10, concurrency=12`, you'll see up to 11
-rows in flight (one per picker count).
+This lets a single row use the full concurrency cap when it's the only
+active row, and fans out to other rows once any row is done. Cost:
+sims that arrive after a plateau triggers are wasted compute (bounded
+at `concurrency - 1` extra per pruned row).
 
 ### Hardware sizing for the concurrency cap
 

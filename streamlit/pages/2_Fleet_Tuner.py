@@ -5,10 +5,13 @@ fleet size.
 Resource-gated: requires `TUNER_ENABLED=1` AND a private/local IP. See
 streamlit/access.py.
 
-Concurrency model: row-parallel, sequential-within-row. Each picker-count
-row sweeps AGVs ascending sequentially (so plateau detection works), but
-multiple picker rows run concurrently up to the user-set cap. A 5950X-class
-host can comfortably sustain ~12 concurrent headless sims.
+Concurrency model: parallel within each picker row. Multiple AGV combos
+for the same picker count run simultaneously (speculative execution),
+with results processed in AGV-ascending order so plateau detection still
+observes them in sequence. When a row plateaus, in-flight speculative
+sessions past the plateau point are cancelled and those slots immediately
+flow to other active rows. A 5950X-class host can comfortably sustain
+~12 concurrent headless sims.
 """
 
 from __future__ import annotations
@@ -16,6 +19,7 @@ from __future__ import annotations
 import io
 import os
 import time
+from collections import deque
 from statistics import mean
 
 import altair as alt
@@ -58,8 +62,15 @@ if not enabled:
 
 defaults = {
     "tuner_running": False,
-    # picker_count -> {"agv_queue": list[int], "prev_best": float,
-    #                  "plateau_counter": int, "done": bool}
+    # picker_count -> {
+    #   "agv_queue":      deque[int],         # not-yet-spawned, ascending
+    #   "in_flight":      dict[int, str],     # agv -> session_id (parallel)
+    #   "results_buffer": dict[int, dict],    # arrived, awaiting in-order check
+    #   "next_to_check":  int,                # next agv count to plateau-check
+    #   "prev_best":      float,
+    #   "plateau_counter":int,
+    #   "done":           bool,
+    # }
     "tuner_rows": {},
     "tuner_results": [],
     # session_id -> {"picker": int, "agvs": int, "started_at": float}
@@ -266,9 +277,12 @@ if start_clicked:
         rows = {}
         total = 0
         for p in range(int(picker_min), int(picker_max) + 1):
-            agv_queue = list(range(int(agv_min), int(agv_max) + 1))
+            agv_queue = deque(range(int(agv_min), int(agv_max) + 1))
             rows[p] = {
                 "agv_queue": agv_queue,
+                "in_flight": {},
+                "results_buffer": {},
+                "next_to_check": int(agv_min),
                 "prev_best": float("-inf"),
                 "plateau_counter": 0,
                 "done": False,
@@ -400,24 +414,20 @@ render_outputs()
 
 # ── Concurrent run loop: poll, process finished, spawn new ────────────────────
 
-def _has_active_session_for_picker(picker: int) -> bool:
-    return any(
-        m["picker"] == picker
-        for m in st.session_state.tuner_active_sessions.values()
-    )
-
-
 def _all_rows_done() -> bool:
     return all(
-        r["done"] and not _has_active_session_for_picker(picker)
-        for picker, r in st.session_state.tuner_rows.items()
+        r["done"] and not r["in_flight"]
+        for r in st.session_state.tuner_rows.values()
     )
 
 
 if st.session_state.tuner_running and cfg:
+    active = st.session_state.tuner_active_sessions
+    rows_state = st.session_state.tuner_rows
+
     # 1. Poll all in-flight sessions; collect any that finished.
     finished_ids = []
-    for sid in list(st.session_state.tuner_active_sessions):
+    for sid in list(active):
         try:
             status = requests.get(
                 f"{MANAGER_URL}/sim/{sid}/status", timeout=5
@@ -428,14 +438,33 @@ if st.session_state.tuner_running and cfg:
             # Sim not yet ready or transient error — try again next tick.
             pass
 
-    # 2. For each finished session: collect KPIs, plateau-check the row.
+    # 2. For each finished session: stash result keyed by AGV count in the
+    #    row's results_buffer. Append to the global results so the heatmap
+    #    sees the data point even if it later gets pruned past plateau.
     for sid in finished_ids:
-        meta = st.session_state.tuner_active_sessions.pop(sid)
+        meta = active.pop(sid)
         result = collect_session_result(sid, meta)
         st.session_state.tuner_results.append(result)
+        row = rows_state[meta["picker"]]
+        row["in_flight"].pop(meta["agvs"], None)
+        # Buffer every result (including errors) so the plateau loop
+        # can advance next_to_check past failed combos rather than
+        # hanging the row indefinitely.
+        row["results_buffer"][meta["agvs"]] = result
 
-        row = st.session_state.tuner_rows[meta["picker"]]
-        if not result.get("error"):
+    # 3. Plateau-check IN ORDER, per row. Drain the buffer as long as
+    #    next_to_check is present so plateau detection observes results
+    #    in AGV-ascending order regardless of arrival order.
+    for picker, row in rows_state.items():
+        if row["done"]:
+            continue
+        while row["next_to_check"] in row["results_buffer"]:
+            result = row["results_buffer"].pop(row["next_to_check"])
+            row["next_to_check"] += 1
+            if result.get("error"):
+                # Errored combo: skip plateau accounting so a single
+                # crashed sim doesn't trigger or break the streak.
+                continue
             metric_value = result[cfg["metric"]]
             threshold = row["prev_best"] * (1.0 + cfg["plateau_tolerance"])
             if metric_value <= threshold:
@@ -445,45 +474,58 @@ if st.session_state.tuner_running and cfg:
             if metric_value > row["prev_best"]:
                 row["prev_best"] = metric_value
             if row["plateau_counter"] >= cfg["plateau_streak"]:
-                row["agv_queue"] = []
+                # Cancel speculative sessions past the plateau point so
+                # their slots flow to other active rows immediately.
+                for agv, sid in list(row["in_flight"].items()):
+                    if agv >= row["next_to_check"]:
+                        try:
+                            requests.delete(
+                                f"{MANAGER_URL}/session/{sid}", timeout=5
+                            )
+                        except Exception:
+                            pass
+                        row["in_flight"].pop(agv, None)
+                        active.pop(sid, None)
+                row["agv_queue"] = deque()
+                row["results_buffer"] = {}
                 row["done"] = True
+                break
 
-        if not row["agv_queue"] and not _has_active_session_for_picker(meta["picker"]):
+        if not row["agv_queue"] and not row["in_flight"] and not row["results_buffer"]:
             row["done"] = True
 
-    # 3. Spawn new sessions: row-parallel, sequential-within-row.
-    in_flight = len(st.session_state.tuner_active_sessions)
+    # 4. Spawn: round-robin across active rows until cap or no work left.
     cap = cfg["concurrency"]
-    # Iterate rows in ascending picker order (so smaller picker rows boot first).
-    for picker in sorted(st.session_state.tuner_rows):
-        if in_flight >= cap:
-            break
-        row = st.session_state.tuner_rows[picker]
-        if row["done"] or not row["agv_queue"]:
-            continue
-        if _has_active_session_for_picker(picker):
-            continue  # row already in flight; preserve sequential-within-row
-        agv = row["agv_queue"][0]
-        sid = spawn_session(
-            cfg["map_name"], agv, picker, cfg["episodes_per_combo"]
-        )
-        if sid is None:
-            # Couldn't spawn; leave the queue intact and retry next tick.
-            continue
-        row["agv_queue"].pop(0)
-        st.session_state.tuner_active_sessions[sid] = {
-            "picker": picker,
-            "agvs": agv,
-            "started_at": time.time(),
-        }
-        in_flight += 1
+    made_progress = True
+    while len(active) < cap and made_progress:
+        made_progress = False
+        # Ascending picker order each pass — lower picker counts get
+        # priority but every row gets a turn within a pass.
+        for picker in sorted(rows_state):
+            if len(active) >= cap:
+                break
+            row = rows_state[picker]
+            if row["done"] or not row["agv_queue"]:
+                continue
+            agv = row["agv_queue"].popleft()
+            sid = spawn_session(
+                cfg["map_name"], agv, picker, cfg["episodes_per_combo"]
+            )
+            if sid is None:
+                # Manager refused (e.g. building) — re-queue and retry next tick.
+                row["agv_queue"].appendleft(agv)
+                continue
+            row["in_flight"][agv] = sid
+            active[sid] = {
+                "picker": picker,
+                "agvs": agv,
+                "started_at": time.time(),
+            }
+            made_progress = True
 
-    # 4. Status: list in-flight combos compactly.
-    if st.session_state.tuner_active_sessions:
-        flying = sorted(
-            (m["picker"], m["agvs"])
-            for m in st.session_state.tuner_active_sessions.values()
-        )
+    # 5. Status: list in-flight combos compactly.
+    if active:
+        flying = sorted((m["picker"], m["agvs"]) for m in active.values())
         inflight_box.info(
             "🚀 In flight: "
             + ", ".join(f"({a}A·{p}P)" for p, a in flying)
@@ -491,8 +533,8 @@ if st.session_state.tuner_running and cfg:
     else:
         inflight_box.empty()
 
-    # 5. Termination check.
-    if _all_rows_done() and not st.session_state.tuner_active_sessions:
+    # 6. Termination check.
+    if _all_rows_done() and not active:
         st.session_state.tuner_running = False
         st.rerun()
     else:
