@@ -108,8 +108,17 @@ def get_maps() -> list[str]:
         return []
 
 
+@st.cache_data(ttl=60)
+def get_order_datasets() -> list[str]:
+    try:
+        r = requests.get(f"{MANAGER_URL}/order_datasets", timeout=5)
+        return r.json().get("order_datasets", []) or []
+    except Exception:
+        return []
+
+
 def spawn_session(map_name: str, num_agvs: int, num_pickers: int,
-                  episodes: int) -> str | None:
+                  episodes: int, order_csv: str | None = None) -> str | None:
     """Create a headless sim session and return its session_id, or None on
     transient failure (the caller can retry on the next tick)."""
     payload = {
@@ -119,6 +128,8 @@ def spawn_session(map_name: str, num_agvs: int, num_pickers: int,
         "num_episodes": int(episodes),
         "headless": True,
     }
+    if order_csv:
+        payload["order_csv"] = order_csv
     try:
         r = requests.post(f"{MANAGER_URL}/session", json=payload, timeout=15)
         if r.status_code == 503 and r.json().get("detail") == "building":
@@ -203,6 +214,14 @@ with st.sidebar:
 
     available_maps = get_maps() or ["tiny_dhl"]
     map_name = st.selectbox("Warehouse Map", available_maps, disabled=not enabled)
+
+    available_orders = get_order_datasets() or ["order_data_sample"]
+    order_csv = st.selectbox(
+        "Order Dataset", available_orders, disabled=not enabled,
+        help="CSV from `simulation/tarware/data/processed/`. Drives "
+             "`request_queue` arrivals — different datasets stress AGV vs "
+             "picker capacity differently.",
+    )
 
     metric = st.selectbox(
         "Optimization metric",
@@ -296,6 +315,7 @@ if start_clicked:
         st.session_state.tuner_total_planned = total
         st.session_state.tuner_config = {
             "map_name": map_name,
+            "order_csv": order_csv,
             "metric": metric,
             "episodes_per_combo": int(episodes_per_combo),
             "plateau_tolerance": float(plateau_tolerance_pct) / 100.0,
@@ -384,7 +404,11 @@ def render_outputs():
     download_box.download_button(
         "💾 Download results as CSV",
         data=buf.getvalue(),
-        file_name=f"fleet_tuner_{cfg['map_name'] if cfg else 'unknown'}_{metric}.csv",
+        file_name=(
+            f"fleet_tuner_{cfg['map_name'] if cfg else 'unknown'}"
+            f"_{cfg.get('order_csv', 'unknown') if cfg else 'unknown'}"
+            f"_{metric}.csv"
+        ),
         mime="text/csv",
     )
 
@@ -509,7 +533,8 @@ if st.session_state.tuner_running and cfg:
                 continue
             agv = row["agv_queue"].popleft()
             sid = spawn_session(
-                cfg["map_name"], agv, picker, cfg["episodes_per_combo"]
+                cfg["map_name"], agv, picker, cfg["episodes_per_combo"],
+                order_csv=cfg.get("order_csv"),
             )
             if sid is None:
                 # Manager refused (e.g. building) — re-queue and retry next tick.

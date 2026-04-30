@@ -124,6 +124,7 @@ class SessionRequest(BaseModel):
     map_name: Optional[str] = None
     num_agvs: Optional[int] = None
     num_pickers: Optional[int] = None
+    order_csv: Optional[str] = None  # filename only (e.g. "order_data_sample"); resolved against /app/tarware/data/processed/
     headless: bool = False  # skip frame rendering for KPI-only sweeps (fleet tuner)
 
 
@@ -140,6 +141,24 @@ def list_maps():
     except Exception:
         maps = []
     return {"maps": maps}
+
+
+@app.get("/order_datasets")
+def list_order_datasets():
+    """List available order CSVs from the mounted simulation source.
+
+    Filters for filenames containing "order" so ABC analysis CSVs sitting
+    in the same directory don't show up as order datasets.
+    """
+    processed_dir = Path("/sim-src/tarware/data/processed")
+    try:
+        datasets = sorted(
+            p.stem for p in processed_dir.glob("*.csv")
+            if "order" in p.stem.lower() and "abc" not in p.stem.lower()
+        )
+    except Exception:
+        datasets = []
+    return {"order_datasets": datasets}
 
 
 def build_sim_image() -> bool:
@@ -254,6 +273,8 @@ def create_session(req: SessionRequest):
         session_env["TARWARE_AGVS"] = str(req.num_agvs)
     if req.num_pickers is not None:
         session_env["TARWARE_PICKERS"] = str(req.num_pickers)
+    if req.order_csv:
+        session_env["TARWARE_ORDER_CSV_PATH"] = f"/app/tarware/data/processed/{req.order_csv}.csv"
     if req.headless:
         session_env["TARWARE_HEADLESS"] = "1"
 
